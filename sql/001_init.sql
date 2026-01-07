@@ -29,8 +29,11 @@ create table if not exists usage_events (
   path text,
   status int,
   ip inet,
-  user_agent text
+  user_agent text,
+  error_message text
 );
 
 create index if not exists idx_usage_app_ts on usage_events(app_id, ts desc);
 create index if not exists idx_deploy_app_time on deployments(app_id, deployed_at desc);
+create index if not exists idx_usage_status on usage_events(status) where status >= 400;
+create index if not exists idx_usage_path on usage_events(path) where path is not null;

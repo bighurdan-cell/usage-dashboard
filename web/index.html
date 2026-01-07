@@ -410,6 +410,70 @@
     .demo-banner.active {
       display: flex;
     }
+    /* Data tables for routes and errors */
+    .data-table {
+      overflow-x: auto;
+    }
+    .data-table table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 12px 16px;
+      background: #0d0d14;
+      color: #9ca3af;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid #252530;
+    }
+    .data-table td {
+      padding: 12px 16px;
+      border-bottom: 1px solid #1a1a24;
+      color: #e8e8ed;
+    }
+    .data-table tr:hover td {
+      background: rgba(99, 102, 241, 0.05);
+    }
+    .data-table .method {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'Monaco', 'Courier New', monospace;
+    }
+    .data-table .method-get { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+    .data-table .method-post { background: rgba(99, 102, 241, 0.15); color: #6366f1; }
+    .data-table .method-put { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .data-table .method-delete { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+    .data-table .path-cell {
+      font-family: 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+      color: #a78bfa;
+    }
+    .data-table .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .data-table .status-2xx { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+    .data-table .status-3xx { background: rgba(99, 102, 241, 0.15); color: #6366f1; }
+    .data-table .status-4xx { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .data-table .status-5xx { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+    .data-table .error-count {
+      color: #ef4444;
+      font-weight: 600;
+    }
+    .data-table .error-count.zero {
+      color: #6b7280;
+      font-weight: normal;
+    }
   </style>
 </head>
 <body>
@@ -450,6 +514,11 @@
           <div class="stat-value" id="stat-requests-7d">0</div>
         </div>
         <div class="stat-card">
+          <div class="stat-label">24h Errors</div>
+          <div class="stat-value" id="stat-errors" style="color: #ef4444;">0</div>
+          <div class="stat-trend">Status 4xx/5xx</div>
+        </div>
+        <div class="stat-card">
           <div class="stat-label">Recent Deployments</div>
           <div class="stat-value" id="stat-deploys">0</div>
           <div class="stat-trend">Last 7 days</div>
@@ -460,6 +529,8 @@
       <div class="tabs">
         <button class="tab active" onclick="switchTab('overview')">Overview</button>
         <button class="tab" onclick="switchTab('analytics')">Analytics</button>
+        <button class="tab" onclick="switchTab('routes')">Routes</button>
+        <button class="tab" onclick="switchTab('errors')">Errors</button>
         <button class="tab" onclick="switchTab('deployments')">Deployments</button>
       </div>
 
@@ -477,6 +548,22 @@
         <div class="chart-container">
           <div class="chart-title">Top Applications by Traffic</div>
           <div id="chart-apps" class="bar-chart" style="height: 250px;"></div>
+        </div>
+      </div>
+
+      <!-- Routes Tab -->
+      <div id="tab-routes" class="tab-content">
+        <div class="chart-container">
+          <div class="chart-title">Per-Route Analytics (Last 7 Days)</div>
+          <div id="routes-table" class="data-table"></div>
+        </div>
+      </div>
+
+      <!-- Errors Tab -->
+      <div id="tab-errors" class="tab-content">
+        <div class="chart-container">
+          <div class="chart-title">Recent Errors (Last 24 Hours)</div>
+          <div id="errors-table" class="data-table"></div>
         </div>
       </div>
 
@@ -527,13 +614,15 @@
       dashboard.style.display = "none";
 
       try {
-        const [overview, analytics, deployments] = await Promise.all([
+        const [overview, analytics, deployments, routes, errors] = await Promise.all([
           fetchAPI("/api/dashboard/overview"),
           fetchAPI("/api/dashboard/analytics"),
-          fetchAPI("/api/dashboard/deployments")
+          fetchAPI("/api/dashboard/deployments"),
+          fetchAPI("/api/dashboard/routes"),
+          fetchAPI("/api/dashboard/errors")
         ]);
 
-        dashboardData = { overview, analytics, deployments };
+        dashboardData = { overview, analytics, deployments, routes, errors };
         
         // Save token to localStorage
         localStorage.setItem('dashboard_token', currentToken);
@@ -547,9 +636,11 @@
           document.getElementById('demo-banner').classList.add('active');
         }
         
-        renderStats(overview, analytics);
+        renderStats(overview, analytics, errors);
         renderApps(overview);
         renderAnalytics(analytics);
+        renderRoutes(routes);
+        renderErrors(errors);
         renderDeployments(deployments);
 
         loading.style.display = "none";
@@ -577,7 +668,7 @@
       error.style.display = "block";
     }
 
-    function renderStats(overview, analytics) {
+    function renderStats(overview, analytics, errors) {
       document.getElementById("stat-apps").textContent = overview.length;
       
       const total24h = overview.reduce((sum, app) => sum + app.hits_24h, 0);
@@ -587,7 +678,13 @@
       document.getElementById("stat-requests-7d").textContent = total7d.toLocaleString();
       
       document.getElementById("stat-deploys").textContent = 
-        analytics.recent_deployments?.length || 0;
+        analytics.recent_deployments_count || 0;
+      
+      // Update errors count if element exists
+      const errorsEl = document.getElementById("stat-errors");
+      if (errorsEl) {
+        errorsEl.textContent = errors?.length || 0;
+      }
     }
 
     function renderApps(apps) {
@@ -605,9 +702,16 @@
       }
 
       apps.forEach(app => {
+        const publicUrl = normalizeUrl(app.public_url);
         const status = app.hits_24h > 0 ? 'healthy' : 'idle';
         const card = document.createElement("div");
         card.className = "app-card";
+        if (publicUrl) {
+          card.style.cursor = "pointer";
+          card.addEventListener('click', () => {
+            window.open(publicUrl, '_blank', 'noopener');
+          });
+        }
         
         card.innerHTML = `
           <div class="app-header">
@@ -650,13 +754,37 @@
           ` : ''}
 
           <div class="app-links">
-            ${app.public_url ? `<a href="${app.public_url}" target="_blank" class="btn btn-primary">Visit Site</a>` : ''}
+            ${publicUrl ? `<a href="${publicUrl}" target="_blank" rel="noopener" class="btn btn-primary">Visit Site</a>` : ''}
             ${app.repo_url ? `<a href="${app.repo_url}" target="_blank" class="btn btn-secondary">Repository</a>` : ''}
           </div>
         `;
         
         container.appendChild(card);
       });
+    }
+
+    function normalizeUrl(url) {
+      if (!url) return '';
+      const trimmed = url.trim();
+      if (!trimmed) return '';
+
+      // Ensure scheme
+      const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+
+      try {
+        const parsed = new URL(withScheme);
+
+        // Basic allowlist: only http/https
+        if (!/^https?:$/i.test(parsed.protocol)) return '';
+
+        // Block known bad domains
+        const host = parsed.hostname.toLowerCase();
+        if (host.includes('bedpage')) return '';
+
+        return parsed.toString();
+      } catch (_) {
+        return '';
+      }
     }
 
     function renderAnalytics(analytics) {
@@ -748,6 +876,113 @@
       if (hours > 0) return `${hours}h ago`;
       if (minutes > 0) return `${minutes}m ago`;
       return 'Just now';
+    }
+
+    function renderRoutes(routes) {
+      const container = document.getElementById("routes-table");
+      
+      if (!routes || routes.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">🛤️</div>
+            <div>No route data recorded yet</div>
+          </div>
+        `;
+        return;
+      }
+
+      const getMethodClass = (method) => {
+        if (!method) return 'method-get';
+        const m = method.toLowerCase();
+        if (m === 'post') return 'method-post';
+        if (m === 'put' || m === 'patch') return 'method-put';
+        if (m === 'delete') return 'method-delete';
+        return 'method-get';
+      };
+
+      container.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Path</th>
+              <th>Total Hits</th>
+              <th>Errors</th>
+              <th>Avg Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${routes.map(r => `
+              <tr>
+                <td><span class="method ${getMethodClass(r.method)}">${r.method || 'GET'}</span></td>
+                <td class="path-cell">${r.path || '/'}</td>
+                <td>${r.total_hits?.toLocaleString() || 0}</td>
+                <td class="error-count ${r.errors === 0 ? 'zero' : ''}">${r.errors || 0}</td>
+                <td><span class="status-badge status-${getStatusClass(r.avg_status)}">${r.avg_status || '-'}</span></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderErrors(errors) {
+      const container = document.getElementById("errors-table");
+      
+      if (!errors || errors.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">✅</div>
+            <div>No errors in the last 24 hours!</div>
+          </div>
+        `;
+        return;
+      }
+
+      const getMethodClass = (method) => {
+        if (!method) return 'method-get';
+        const m = method.toLowerCase();
+        if (m === 'post') return 'method-post';
+        if (m === 'put' || m === 'patch') return 'method-put';
+        if (m === 'delete') return 'method-delete';
+        return 'method-get';
+      };
+
+      container.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>App</th>
+              <th>Method</th>
+              <th>Path</th>
+              <th>Status</th>
+              <th>Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${errors.map(e => `
+              <tr>
+                <td>${formatRelativeTime(e.ts)}</td>
+                <td>${e.app_name || '-'}</td>
+                <td><span class="method ${getMethodClass(e.method)}">${e.method || 'GET'}</span></td>
+                <td class="path-cell">${e.path || '/'}</td>
+                <td><span class="status-badge status-${getStatusClass(e.status)}">${e.status || '-'}</span></td>
+                <td>${e.error_message || '-'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function getStatusClass(status) {
+      if (!status) return '2xx';
+      const s = parseInt(status);
+      if (s >= 500) return '5xx';
+      if (s >= 400) return '4xx';
+      if (s >= 300) return '3xx';
+      return '2xx';
     }
   </script>
 </body>

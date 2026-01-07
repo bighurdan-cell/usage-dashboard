@@ -1,9 +1,26 @@
 import express from "express";
 import pg from "pg";
+import rateLimit from "express-rate-limit";
 import "dotenv/config";
 
 const app = express();
 app.use(express.json({ limit: "200kb" }));
+
+// Rate limiting for usage endpoint (prevent abuse)
+const usageLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100, // 100 requests per minute per IP
+  message: { error: "rate_limit_exceeded", retry_after: 60 },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// General API rate limiter
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 200,
+  message: { error: "rate_limit_exceeded" },
+});
 
 // Prevent caching issues - serve static files with no-cache headers
 app.use(express.static(new URL("../web", import.meta.url).pathname, {
@@ -29,13 +46,28 @@ function requireToken(req, res, next) {
   next();
 }
 
-// ---- health
+// ---- health (enhanced for uptime monitors)
 app.get("/health", async (req, res) => {
+  const start = Date.now();
   try {
     await pool.query("select 1");
-    res.json({ ok: true, db: "connected" });
+    const dbLatency = Date.now() - start;
+    res.json({ 
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      db: { connected: true, latency_ms: dbLatency },
+      memory: {
+        used_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        total_mb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+      }
+    });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(503).json({ 
+      status: "unhealthy",
+      timestamp: new Date().toISOString(),
+      db: { connected: false, error: err.message }
+    });
   }
 });
 
@@ -76,9 +108,9 @@ app.post("/api/deployments", requireToken, async (req, res) => {
   res.json(rows[0]);
 });
 
-// ---- record a usage event (manual logging)
-app.post("/api/usage", requireToken, async (req, res) => {
-  const { app_slug, kind = "request", method, path, status, ip, user_agent } = req.body || {};
+// ---- record a usage event (manual logging) - with rate limiting
+app.post("/api/usage", usageLimiter, requireToken, async (req, res) => {
+  const { app_slug, kind = "request", method, path, status, ip, user_agent, error_message } = req.body || {};
   if (!app_slug) return res.status(400).json({ error: "app_slug_required" });
 
   const appRow = await pool.query("select id from apps where slug=$1", [app_slug]);
@@ -86,10 +118,10 @@ app.post("/api/usage", requireToken, async (req, res) => {
   if (!appId) return res.status(404).json({ error: "app_not_found" });
 
   const { rows } = await pool.query(
-    `insert into usage_events (app_id, kind, method, path, status, ip, user_agent)
-     values ($1,$2,$3,$4,$5,$6,$7)
+    `insert into usage_events (app_id, kind, method, path, status, ip, user_agent, error_message)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)
      returning *;`,
-    [appId, kind, method || null, path || null, status || null, ip || null, user_agent || null]
+    [appId, kind, method || null, path || null, status || null, ip || null, user_agent || null, error_message || null]
   );
 
   res.json(rows[0]);
@@ -184,6 +216,75 @@ app.get("/api/dashboard/deployments", requireToken, async (req, res) => {
   `;
   const { rows } = await pool.query(q);
   res.json(rows);
+});
+
+// ---- per-route analytics
+app.get("/api/dashboard/routes", requireToken, async (req, res) => {
+  const q = `
+    select 
+      path,
+      method,
+      count(*)::int as total_hits,
+      count(*) filter (where status >= 400)::int as errors,
+      round(avg(status)::numeric, 1) as avg_status
+    from usage_events
+    where ts >= now() - interval '7 days'
+      and path is not null
+    group by path, method
+    order by total_hits desc
+    limit 50;
+  `;
+  const { rows } = await pool.query(q);
+  res.json(rows);
+});
+
+// ---- error analytics
+app.get("/api/dashboard/errors", requireToken, async (req, res) => {
+  const q = `
+    select 
+      a.name as app_name,
+      ue.path,
+      ue.method,
+      ue.status,
+      ue.error_message,
+      ue.ts,
+      ue.ip::text
+    from usage_events ue
+    join apps a on a.id = ue.app_id
+    where ue.status >= 400
+      and ue.ts >= now() - interval '24 hours'
+    order by ue.ts desc
+    limit 100;
+  `;
+  const { rows } = await pool.query(q);
+  res.json(rows);
+});
+
+// ---- data retention: prune old events (call via cron or manually)
+app.post("/api/admin/prune", requireToken, async (req, res) => {
+  const { days = 90 } = req.body || {};
+  const result = await pool.query(
+    `delete from usage_events where ts < now() - interval '1 day' * $1 returning id`,
+    [days]
+  );
+  res.json({ 
+    pruned: result.rowCount,
+    retention_days: days,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ---- stats summary for uptime monitors
+app.get("/api/stats", async (req, res) => {
+  const q = `
+    select 
+      (select count(*) from apps) as total_apps,
+      (select count(*) from usage_events where ts >= now() - interval '24 hours') as hits_24h,
+      (select count(*) from usage_events where ts >= now() - interval '24 hours' and status >= 400) as errors_24h,
+      (select count(*) from deployments where deployed_at >= now() - interval '7 days') as deploys_7d
+  `;
+  const { rows } = await pool.query(q);
+  res.json(rows[0]);
 });
 
 const PORT = 3002;
